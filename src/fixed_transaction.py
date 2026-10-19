@@ -17,5 +17,5 @@ def process_transaction(user_id, amount, db_connection):
         log_entry += "Transaction failed: invalid amount"
     _ = db_connection
     with open("audit_log.txt", "w", encoding="utf-8") as file:
-        file.write(log_entry)
+     file.write(log_entry)
     return status
