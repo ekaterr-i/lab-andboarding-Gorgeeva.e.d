@@ -45,3 +45,4 @@ file	Строка 9 (file = open(...))	Строка 10 (file.write(log_entry))
 • exclude = .git,__pycache__,docs: Запрещает линтеру проверять служебные папки репозитория, кэш-файлы и текстовую документацию.
 4.2.https://github.com/ekaterr-i/lab-andboarding-Gorgeeva.e.d.git
 4.3.
+<img width="1280" height="706" alt="image" src="https://github.com/user-attachments/assets/6e170efa-5a98-434c-82e5-857d2f717d26" />
