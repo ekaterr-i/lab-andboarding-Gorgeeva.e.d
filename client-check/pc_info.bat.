@@ -1,0 +1,227 @@
+@echo off
+chcp 65001 >nul
+setlocal EnableDelayedExpansion
+
+:: ============================================================================
+:: ИНИЦИАЛИЗАЦИЯ ПЕРЕМЕННЫХ И ПУТЕЙ
+:: ============================================================================
+set "REPORT=%~dp0pc_report.txt"
+set "TEMP_RAW=%TEMP%\apps_raw.txt"
+set "TEMP_APPS=%TEMP%\apps_list.txt"
+
+set /a BASE_TOTAL=5
+set /a REC_COUNT=0
+
+:: Очистка старого файла отчета
+if exist "%REPORT%" del /f /q "%REPORT%"
+
+echo [1/4] Сбор базовой информации о системе...
+
+call :log "================================================================"
+call :log "ОТЧЕТ АУДИТА РАБОЧЕГО МЕСТА"
+call :log "Дата и время формирования: %date% %time%"
+call :log "================================================================"
+call :log ""
+
+:: ============================================================================
+:: БЛОК 1: СБОР СВЕДЕНИЙ О СИСТЕМЕ (С ЗАЩИТОЙ ОТ ПУСТЫХ ЗНАЧЕНИЙ)
+:: ============================================================================
+call :log "--- 1. ОБЩИЕ СВЕДЕНИЯ О СИСТЕМЕ ---"
+
+:: Имя компьютера и пользователь
+set "comp_name="
+set "user_name="
+set "comp_name=%COMPUTERNAME%"
+set "user_name=%USERNAME%"
+
+if defined comp_name (call :log "Имя компьютера: !comp_name!") else (call :log "Имя компьютера: Не удалось получить данные")
+if defined user_name (call :log "Текущий пользователь: !user_name!") else (call :log "Текущий пользователь: Не удалось получить данные")
+
+:: Операционная система (через PowerShell Get-CimInstance вместо устаревшего wmic)
+set "os_name="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).Caption" 2^>nul`) do set "os_name=%%I"
+if defined os_name (
+    call :log "Операционная система: !os_name!"
+) else (
+    call :log "Операционная система: Не удалось получить данные"
+)
+
+:: Процессор
+set "cpu_name="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name" 2^>nul`) do set "cpu_name=%%I"
+if defined cpu_name (
+    call :log "Процессор: !cpu_name!"
+) else (
+    call :log "Процессор: Не удалось получить данные"
+)
+
+:: Оперативная память (в ГБ)
+set "ram_gb="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)" 2^>nul`) do set "ram_gb=%%I"
+if defined ram_gb (
+    call :log "Оперативная память: !ram_gb! ГБ"
+) else (
+    call :log "Оперативная память: Не удалось получить данные"
+)
+
+:: Системный диск (Свободно / Всего в ГБ без переполнения разрядной сетки)
+set "disk_info="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$d = Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='C:'\"; if($d){ '{0} ГБ свободно из {1} ГБ' -f [math]::Round($d.FreeSpace/1GB, 1), [math]::Round($d.Size/1GB, 1) }" 2^>nul`) do set "disk_info=%%I"
+if defined disk_info (
+    call :log "Диск C: !disk_info!"
+) else (
+    call :log "Диск C: Не удалось получить данные"
+)
+
+call :log ""
+
+:: ============================================================================
+:: БЛОК 2: ФОРМИРОВАНИЕ СПИСКА УСТАНОВЛЕННЫХ ПРОГРАММ ИЗ РЕЕСТРА
+:: ============================================================================
+echo [2/4] Опрос реестра (64-bit и 32-bit ветки). Пожалуйста, подождите...
+
+if exist "%TEMP_RAW%" del /f /q "%TEMP_RAW%"
+if exist "%TEMP_APPS%" del /f /q "%TEMP_APPS%"
+
+:: Опрос 64-битной и 32-битной (WOW6432Node) веток Uninstall
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" /s /v DisplayName >> "%TEMP_RAW%" 2>nul
+reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" /s /v DisplayName >> "%TEMP_RAW%" 2>nul
+reg query "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" /s /v DisplayName >> "%TEMP_RAW%" 2>nul
+
+:: Извлечение только названий программ (третий токен после DisplayName REG_SZ)
+for /f "tokens=1,2,*" %%A in ('findstr /i "DisplayName" "%TEMP_RAW%"') do (
+    if not "%%C"=="" echo %%C>> "%TEMP_APPS%"
+)
+
+:: Сортировка и удаление дубликатов через PowerShell
+if exist "%TEMP_APPS%" (
+    powershell -NoProfile -Command "Get-Content '%TEMP_APPS%' | Sort-Object -Unique | Set-Content '%TEMP_APPS%' -Encoding UTF8"
+) else (
+    type nul > "%TEMP_APPS%"
+)
+
+:: ============================================================================
+:: БЛОК 3: АНАЛИЗ БАЗОВОГО ОФИСНОГО ПО
+:: ============================================================================
+echo [3/4] Анализ наличия базового офисного ПО...
+call :log "--- 2. ПРОВЕРКА БАЗОВОГО ОФИСНОГО ПО ---"
+
+:: Категория 1: Офисный пакет
+set "found_prog="
+for /f "delims=" %%I in ('findstr /i "Office LibreOffice OpenOffice МойОфис" "%TEMP_APPS%"') do if not defined found_prog set "found_prog=%%I"
+if defined found_prog (
+    call :log "[OK] Офисный пакет: Установлен (!found_prog!)"
+) else (
+    set /a REC_COUNT+=1
+    call :log "[РЕКОМЕНДАЦИЯ] Не обнаружен офисный пакет. Для работы с документами и таблицами рекомендуется установить LibreOffice или МойОфис."
+)
+
+:: Категория 2: Архиватор
+set "found_prog="
+for /f "delims=" %%I in ('findstr /i "7-Zip WinRAR WinZip" "%TEMP_APPS%"') do if not defined found_prog set "found_prog=%%I"
+if defined found_prog (
+    call :log "[OK] Архиватор: Установлен (!found_prog!)"
+) else (
+    set /a REC_COUNT+=1
+    call :log "[РЕКОМЕНДАЦИЯ] Не обнаружен архиватор. Для работы с вложениями в почте рекомендуется установить 7-Zip."
+)
+
+:: Категория 3: Программа для чтения PDF
+set "found_prog="
+for /f "delims=" %%I in ('findstr /i "Acrobat Foxit SumatraPDF" "%TEMP_APPS%"') do if not defined found_prog set "found_prog=%%I"
+if defined found_prog (
+    call :log "[OK] Просмотр PDF: Установлен (!found_prog!)"
+) else (
+    set /a REC_COUNT+=1
+    call :log "[РЕКОМЕНДАЦИЯ] Не обнаружена специализированная программа для чтения PDF. Рекомендуется установить SumatraPDF или Adobe Acrobat Reader."
+)
+
+:: Категория 4: Браузер (с учетом системного Edge)
+set "found_prog="
+for /f "delims=" %%I in ('findstr /i "Chrome Firefox Яндекс Yandex" "%TEMP_APPS%"') do if not defined found_prog set "found_prog=%%I"
+if defined found_prog (
+    call :log "[OK] Веб-браузер: Установлен сторонний браузер (!found_prog!)"
+) else (
+    set "edge_found="
+    for /f "delims=" %%I in ('findstr /i "Edge" "%TEMP_APPS%"') do if not defined edge_found set "edge_found=%%I"
+    if defined edge_found (
+        set /a REC_COUNT+=1
+        call :log "[ПРИМЕЧАНИЕ] Обнаружен только системный компонент (!edge_found!). Рекомендуется проверить, соответствует ли он корпоративному стандарту, или установить Chrome / Яндекс Браузер."
+    ) else (
+        set /a REC_COUNT+=1
+        call :log "[РЕКОМЕНДАЦИЯ] Не обнаружен корпоративный браузер. Рекомендуется установить Google Chrome или Яндекс Браузер."
+    )
+)
+
+:: Категория 5: Антивирусная защита (учитываем Windows Defender через службу/PowerShell)
+set "found_prog="
+for /f "delims=" %%I in ('findstr /i "Kaspersky ESET Dr.Web" "%TEMP_APPS%"') do if not defined found_prog set "found_prog=%%I"
+if defined found_prog (
+    call :log "[OK] Антивирус: Установлен (!found_prog!)"
+) else (
+    set "def_status="
+    for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-Service WinDefend -ErrorAction SilentlyContinue).Status" 2^>nul`) do set "def_status=%%I"
+    if /i "!def_status!"=="Running" (
+        call :log "[OK] Антивирус: Активен встроенный компонент безопасности Windows Defender"
+    ) else (
+        set /a REC_COUNT+=1
+        call :log "[РЕКОМЕНДАЦИЯ] Не обнаружен активный антивирус. Рекомендуется проверить состояние Защитника Windows или установить Kaspersky / Dr.Web."
+    )
+)
+
+call :log ""
+
+:: ============================================================================
+:: БЛОК 4: АНАЛИЗ ИЗЛИШНЕГО / НЕЦЕЛЕВОГО ПО (ПО ГРУППАМ)
+:: ============================================================================
+echo [4/4] Поиск нецелевого ПО по категориям...
+call :log "--- 3. ПРОВЕРКА НАЛИЧИЯ ИЗЛИШНЕГО ПО ---"
+call :log "ВАЖНО: Вывод ниже носит рекомендательный характер. Программы из списка"
+call :log "не относятся к базовым офисным задачам и подлежат проверке администратором,"
+call :log "а не безусловному удалению (часть ПО может быть согласована для работы)."
+call :log ""
+
+:: Группа 1: Игровое ПО
+call :log "[Группа 1: Игровое ПО и игровые платформы]"
+set "group_found=0"
+for /f "delims=" %%I in ('findstr /i "Steam Epic Games GOG Origin Ubisoft Battle.net Riot game gaming" "%TEMP_APPS%"') do (
+    set "group_found=1"
+    set /a REC_COUNT+=1
+    call :log "  [ТРЕБУЕТ ПРОВЕРКИ] %%I"
+)
+if "!group_found!"=="0" call :log "  Нарушений не выявлено."
+
+:: Группа 2: Торрент-клиенты
+call :log "[Группа 2: Торрент-клиенты и файлообменники]"
+set "group_found=0"
+for /f "delims=" %%I in ('findstr /i "torrent uTorrent BitTorrent qBittorrent Vuze" "%TEMP_APPS%"') do (
+    set "group_found=1"
+    set /a REC_COUNT+=1
+    call :log "  [ТРЕБУЕТ ПРОВЕРКИ] %%I"
+)
+if "!group_found!"=="0" call :log "  Нарушений не выявлено."
+
+:: Группа 3: Мессенджеры для личного общения
+call :log "[Группа 3: Мессенджеры (проверка соответствия корпоративному стандарту)]"
+set "group_found=0"
+for /f "delims=" %%I in ('findstr /i "Discord Telegram WhatsApp Viber Skype" "%TEMP_APPS%"') do (
+    set "group_found=1"
+    set /a REC_COUNT+=1
+    call :log "  [ТРЕБУЕТ ПРОВЕРКИ] %%I (уточнить использование в рабочих задачах)"
+)
+if "!group_found!"=="0" call :log "  Нарушений не выявлено."
+
+:: Группа 4: Развлечения и оформление
+call :log "[Группа 4: Инструменты для развлечений, стриминга и оформления]"
+set "group_found=0"
+for /f "delims=" %%I in ('findstr /i "Wallpaper Engine OBS Soundpad" "%TEMP_APPS%"') do (
+    set "group_found=1"
+    set /a REC_COUNT+=1
+    call :log "  [ТРЕБУЕТ ПРОВЕРКИ] %%I"
+)
+if "!group_found!"=="0" call :log "  Нарушений не выявлено."
+
+call :log ""
+call :log "================================================================"
+call :log "ИТОГИ АУДИТА:"
+call :log "Проверено категорий базового ПО: %BASE_TOTAL%"
